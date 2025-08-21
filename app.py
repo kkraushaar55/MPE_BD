@@ -427,17 +427,27 @@ df = apply_filters(df_all, exclude_agencies=exclude_agencies, include_kw=inc_kw,
 
 # Metrics & visuals
 c1, c2, c3, c4 = st.columns(4)
-with c1:
-    st.metric("Open roles", int(df.shape[0]))
-with c2:
-    st.metric("Hiring companies", int(df["company"].nunique()))
-with c3:
-    st.metric("Top locations", int(df["location"].nunique()))
-with c4:
-    st.metric("Sources", ", ".join(sorted(df["source"].unique().tolist())))
+# Metrics & visuals
+c1, c2, c3, c4 = st.columns(4)
 
-# Top 10 by industry
 if not df.empty:
+    with c1:
+        st.metric("Open roles", int(df.shape[0]))
+    with c2:
+        st.metric("Hiring companies", int(df["company"].nunique()))
+    with c3:
+        st.metric("Top locations", int(df["location"].nunique()))
+    with c4:
+        st.metric("Sources", ", ".join(sorted(df["source"].unique().tolist())))
+else:
+    with c1:
+        st.metric("Open roles", 0)
+    with c2:
+        st.metric("Hiring companies", 0)
+    with c3:
+        st.metric("Top locations", 0)
+    with c4:
+        st.metric("Sources", "None")
     st.subheader("Open roles by industry")
     counts = df.groupby("industry").size().sort_values(ascending=False).head(10)
     st.bar_chart(counts)
