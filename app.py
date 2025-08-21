@@ -6,7 +6,8 @@ What it does
 - Optional: also pull from a watchlist CSV (Greenhouse/Lever) to add more companies
 - US-only filter, expanded staffing-agency blocklist, strict title filters
 - Organized by company with counts + full results table
-- Caches Adzuna responses for 1 hour to save your daily quota, and shows clear errors
+- Caches Adzuna responses for 1 hour to save your daily quota
+- Auto-caps request budget; stops on first 429 and offers cached-only fallback
 
 Setup
 - In Streamlit Cloud → Manage App → Settings → Secrets:
@@ -29,6 +30,8 @@ ADZUNA_APP_ID = os.getenv("ADZUNA_APP_ID", "")
 ADZUNA_APP_KEY = os.getenv("ADZUNA_APP_KEY", "")
 USER_AGENT = "Mozilla/5.0 (BD Jobs Dashboard)"
 TIMEOUT = 20
+
+SAFE_DAILY_BUDGET = 200  # keep below typical free-tier daily limit
 
 # ---------------------------
 # Role definitions (expanded)
@@ -95,7 +98,7 @@ MANAGER_VARIANTS = [
     "sustaining engineering manager",
 ]
 
-# Strict title regex (captures senior/principal/lead because base phrase appears)
+# Strict title regex
 TITLE_REGEX = re.compile(
     r"""(?ix)
     \b(
@@ -133,7 +136,7 @@ TITLE_REGEX = re.compile(
         lean\s+manufacturing\s+engineer|
         sustaining\s+engineer|
 
-        # Managers / manager-variants
+        # Managers / variants
         (controls?|automation)\s+(engineering\s+)?manager|
         process\s+(engineering\s+)?manager|
         maintenance(\s+engineering)?\s+manager|
@@ -178,7 +181,6 @@ DEFAULT_AGENCY_BLOCKLIST = {
     "astoncarter","pinnacle group","harvey nash","rht","trc staffing","signature consultants","signature","atrium staffing",
     "suna","tri-s","tri s","talentpath","talentburst","datanomics"
 }
-
 US_STATE_ABBR = {
     "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME",
     "MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA",
@@ -251,7 +253,12 @@ def fetch_adzuna_jobs(query: str, where: str, max_days_old: int, pages: int) -> 
         except requests.HTTPError as e:
             code = getattr(e.response, "status_code", "HTTP")
             st.error(f"Adzuna error (HTTP {code}). Reduce pages/roles or try later.")
-            break
+            # Stop immediately on rate limit or auth errors
+            if code in (401, 403, 429):
+                st.session_state["_adzuna_quota_hit"] = True
+                break
+            else:
+                break
         except Exception:
             st.error("Adzuna request failed. Check keys/network or try again.")
             break
@@ -270,7 +277,7 @@ def fetch_adzuna_jobs(query: str, where: str, max_days_old: int, pages: int) -> 
     return jobs
 
 # ---------------------------
-# Optional watchlist (Greenhouse/Lever)
+# Optional watchlist (Greenhouse/Lever) — zero Adzuna cost
 # ---------------------------
 def fetch_greenhouse_jobs(token: str) -> list[dict]:
     url = f"https://boards-api.greenhouse.io/v1/boards/{token}/jobs"
@@ -347,10 +354,14 @@ with st.sidebar:
     max_days_old = st.slider("Max days old", 1, 60, 21)
     pages = st.slider("Adzuna pages (x50 / role)", 1, 15, 8)
 
-    # Warn if you're about to blow the free daily limit (~250/day)
+    # Request budget guard
     estimated_requests = max(1, len(role_queries or (CORE_ENGINEERING_ROLES + MANAGER_VARIANTS))) * pages
-    if estimated_requests > 200:
-        st.warning(f"About to make ~{estimated_requests} Adzuna calls. Reduce 'Pages' or select fewer roles (free tier ≈250/day).")
+    auto_cap = st.checkbox("Auto-cap requests to stay within free daily budget", value=True)
+    effective_pages = pages
+    if auto_cap and estimated_requests > SAFE_DAILY_BUDGET:
+        # shrink pages to fit within budget
+        effective_pages = max(1, SAFE_DAILY_BUDGET // max(1, len(role_queries or [1])))
+        st.warning(f"Auto-capped pages from {pages} to {effective_pages} to keep ~{len(role_queries)}×{effective_pages} ≤ {SAFE_DAILY_BUDGET} calls.")
 
     st.divider()
     st.header("Agency Filters")
@@ -360,9 +371,12 @@ with st.sidebar:
     extra_agencies_set = {x.strip() for x in extra_agencies.split(",") if x.strip()}
 
     st.divider()
-    st.header("Watchlist (optional)")
+    st.header("Watchlist (optional) — no Adzuna usage")
     include_watchlist = st.checkbox("Include companies.csv (Greenhouse/Lever)", value=False)
     st.caption("Add companies.csv at repo root with: company,ats,token,industry")
+
+    st.divider()
+    cached_only = st.checkbox("Cached-only mode (don’t call Adzuna)", value=False)
 
     run = st.button("Fetch Jobs")
 
@@ -370,16 +384,23 @@ with st.sidebar:
 # Fetch + Filter
 # ---------------------------
 df = pd.DataFrame(columns=["company","title","location","posted_at","url","feed"])
+quota_hit = False
 
 if run:
     jobs: list[dict] = []
 
     # 1) Adzuna (broad market)
-    for q in (role_queries or CORE_ENGINEERING_ROLES + MANAGER_VARIANTS):
-        jobs.extend(fetch_adzuna_jobs(query=q, where=location_hint or "United States",
-                                      max_days_old=max_days_old, pages=pages))
+    if not cached_only:
+        st.session_state["_adzuna_quota_hit"] = False
+        for q in (role_queries or CORE_ENGINEERING_ROLES + MANAGER_VARIANTS):
+            if st.session_state.get("_adzuna_quota_hit"):
+                quota_hit = True
+                break
+            jobs.extend(fetch_adzuna_jobs(query=q, where=location_hint or "United States",
+                                          max_days_old=max_days_old, pages=effective_pages))
+        quota_hit = quota_hit or st.session_state.get("_adzuna_quota_hit", False)
 
-    # 2) Optional: Watchlist CSV
+    # 2) Optional: Watchlist CSV (zero cost)
     if include_watchlist and os.path.exists("companies.csv"):
         wl = pd.read_csv("companies.csv")
         wl.columns = [c.strip().lower() for c in wl.columns]
@@ -417,6 +438,11 @@ if run:
         raw = raw.drop_duplicates(subset=["company","title","location","url"], keep="first")
         if not raw.empty:
             df = raw[["company","title","location","posted_at","url","feed"]].copy()
+            st.session_state["_last_results"] = df.copy()
+
+    elif cached_only and st.session_state.get("_last_results") is not None:
+        df = st.session_state["_last_results"].copy()
+        st.info("Showing cached results (no new Adzuna calls).")
 
 # ---------------------------
 # Company-first view
@@ -428,10 +454,33 @@ if not df.empty:
     with c3: st.metric("Unique locations", int(df["location"].nunique()))
     with c4: st.metric("Feeds", ", ".join(sorted(df["feed"].unique())) if "feed" in df.columns else "adzuna")
 
+    if quota_hit:
+        st.warning("Adzuna rate limit reached. Results include whatever was fetched before the throttle plus any Watchlist (ATS) data. Use Cached-only mode to avoid more API calls.")
+
     st.subheader("Top Companies by Open Roles")
     top_companies = df.groupby("company").size().sort_values(ascending=False)
     st.bar_chart(top_companies.head(25))
 
     st.subheader("Company → Open Roles (Count)")
-    comp
+    company_counts = top_companies.reset_index()
+    company_counts.columns = ["company","open_roles"]
+    st.dataframe(company_counts, use_container_width=True, hide_index=True)
 
+    st.subheader("All Results")
+    st.dataframe(df.sort_values(["company","title"]), use_container_width=True, hide_index=True)
+
+    st.download_button(
+        label="Download CSV",
+        data=df.to_csv(index=False).encode("utf-8"),
+        file_name="bd_us_mfg_eng_mgr_no_agencies.csv",
+        mime="text/csv",
+    )
+else:
+    with c1: st.metric("Open roles", 0)
+    with c2: st.metric("Hiring companies", 0)
+    with c3: st.metric("Unique locations", 0)
+    with c4: st.metric("Feeds", "—")
+    if quota_hit:
+        st.warning("Adzuna rate limit hit before any results. Toggle 'Cached-only mode' or enable Watchlist (companies.csv) to keep operating without Adzuna.")
+    else:
+        st.info("No jobs found. Widen roles, increase pages, or adjust filters, then click **Fetch Jobs**.")
