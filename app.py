@@ -1,16 +1,17 @@
 """
 BD Jobs Dashboard — US Manufacturing Engineering & Managers (No Agencies)
 
-What it does:
+What it does
 - Searches Adzuna for targeted roles (engineers + manager variants) across any company
-- Optional: Augment with your own company watchlist (Greenhouse/Lever) via companies.csv
-- US-only filter, expanded agency blocklist, strict title filters
+- Optional: also pull from a watchlist CSV (Greenhouse/Lever) to add more companies
+- US-only filter, expanded staffing-agency blocklist, strict title filters
 - Organized by company with counts + full results table
+- Caches Adzuna responses for 1 hour to save your daily quota, and shows clear errors
 
-Setup:
-- Put your Adzuna credentials in Streamlit Cloud: Settings → Secrets
-  ADZUNA_APP_ID = "..."
-  ADZUNA_APP_KEY = "..."
+Setup
+- In Streamlit Cloud → Manage App → Settings → Secrets:
+    ADZUNA_APP_ID = "..."
+    ADZUNA_APP_KEY = "..."
 """
 
 import os
@@ -220,32 +221,41 @@ def is_us_location(display: str, area: list[str] | None) -> bool:
     return False
 
 # ---------------------------
-# Adzuna connector
+# Cached Adzuna page
 # ---------------------------
+@st.cache_data(ttl=3600, show_spinner=False)
+def _adzuna_page(query: str, where: str, max_days_old: int, page: int):
+    base = "https://api.adzuna.com/v1/api/jobs/us/search/"
+    params = {
+        "app_id": ADZUNA_APP_ID,
+        "app_key": ADZUNA_APP_KEY,
+        "results_per_page": 50,
+        "what": query,
+        "where": where,
+        "category": "engineering-jobs",
+        "max_days_old": max_days_old,
+        "content-type": "application/json",
+    }
+    r = requests.get(base + str(page), params=params, timeout=TIMEOUT, headers={"User-Agent": USER_AGENT})
+    r.raise_for_status()
+    return r.json().get("results", [])
+
 def fetch_adzuna_jobs(query: str, where: str, max_days_old: int, pages: int) -> list[dict]:
     if not (ADZUNA_APP_ID and ADZUNA_APP_KEY):
+        st.error("Missing Adzuna keys. Add ADZUNA_APP_ID and ADZUNA_APP_KEY in Streamlit Secrets.")
         return []
-    base = "https://api.adzuna.com/v1/api/jobs/us/search/"
     jobs = []
     for page in range(1, pages + 1):
-        params = {
-            "app_id": ADZUNA_APP_ID,
-            "app_key": ADZUNA_APP_KEY,
-            "results_per_page": 50,
-            "what": query,
-            "where": where,
-            "category": "engineering-jobs",
-            "max_days_old": max_days_old,
-            "content-type": "application/json",
-        }
         try:
-            r = requests.get(base + str(page), params=params, timeout=TIMEOUT, headers={"User-Agent": USER_AGENT})
-            if r.status_code != 200:
-                break
-            data = r.json()
+            results = _adzuna_page(query, where, max_days_old, page)
+        except requests.HTTPError as e:
+            code = getattr(e.response, "status_code", "HTTP")
+            st.error(f"Adzuna error (HTTP {code}). Reduce pages/roles or try later.")
+            break
         except Exception:
-            continue
-        for j in data.get("results", []):
+            st.error("Adzuna request failed. Check keys/network or try again.")
+            break
+        for j in results:
             loc = j.get("location") or {}
             jobs.append({
                 "feed": "adzuna",
@@ -312,7 +322,7 @@ def fetch_lever_jobs(token: str) -> list[dict]:
 # ---------------------------
 st.set_page_config(page_title="BD Jobs — Mfg Engineering & Managers", layout="wide")
 st.title("US Manufacturing Engineering & Manager Hiring (No Agencies)")
-st.caption("Adzuna + optional Watchlist (Greenhouse/Lever). Organized by company.")
+st.caption("Adzuna + optional Watchlist (Greenhouse/Lever). Organized by company. Cached to protect your API quota.")
 
 with st.sidebar:
     st.header("Roles & Scope")
@@ -335,7 +345,12 @@ with st.sidebar:
     location_hint = st.text_input("Location filter hint", value="United States")
     us_only = st.checkbox("US only", value=True)
     max_days_old = st.slider("Max days old", 1, 60, 21)
-    pages = st.slider("Adzuna pages (x50 results each)", 1, 15, 8)
+    pages = st.slider("Adzuna pages (x50 / role)", 1, 15, 8)
+
+    # Warn if you're about to blow the free daily limit (~250/day)
+    estimated_requests = max(1, len(role_queries or (CORE_ENGINEERING_ROLES + MANAGER_VARIANTS))) * pages
+    if estimated_requests > 200:
+        st.warning(f"About to make ~{estimated_requests} Adzuna calls. Reduce 'Pages' or select fewer roles (free tier ≈250/day).")
 
     st.divider()
     st.header("Agency Filters")
@@ -418,22 +433,5 @@ if not df.empty:
     st.bar_chart(top_companies.head(25))
 
     st.subheader("Company → Open Roles (Count)")
-    company_counts = top_companies.reset_index()
-    company_counts.columns = ["company","open_roles"]
-    st.dataframe(company_counts, use_container_width=True, hide_index=True)
+    comp
 
-    st.subheader("All Results")
-    st.dataframe(df.sort_values(["company","title"]), use_container_width=True, hide_index=True)
-
-    st.download_button(
-        label="Download CSV",
-        data=df.to_csv(index=False).encode("utf-8"),
-        file_name="bd_us_mfg_eng_mgr_no_agencies.csv",
-        mime="text/csv",
-    )
-else:
-    with c1: st.metric("Open roles", 0)
-    with c2: st.metric("Hiring companies", 0)
-    with c3: st.metric("Unique locations", 0)
-    with c4: st.metric("Feeds", "—")
-    st.info("No jobs found. Widen roles, increase pages, or adjust filters, then click **Fetch Jobs**.")
