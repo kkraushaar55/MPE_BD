@@ -1,7 +1,7 @@
 """
 BD Jobs Dashboard — Controls & Industrial Automation (No Agencies, US-only)
-Focus: Controls/Automation Engineering + Leadership (manufacturing/industrial)
-EXCLUDES: software/test automation, QA/SDET, DevOps automation
+Focus: Controls/Automation Engineering + Leadership in manufacturing/industrial
+EXCLUDES: software/test automation (SDET/QA/dev/test frameworks)
 
 Feeds:
 - Adzuna (cached + budget-capped)
@@ -11,25 +11,41 @@ Feeds:
 Secrets (Streamlit → Manage App → Settings → Secrets)
   ADZUNA_APP_ID = "..."
   ADZUNA_APP_KEY = "..."
-  BING_SEARCH_KEY = "..."     # needed for Web Discovery
-# Optional
+  BING_SEARCH_KEY = "..."     # optional but recommended for Web Discovery
+# Optional override:
 #  BING_ENDPOINT = "https://api.bing.microsoft.com/v7.0/search"
 """
 
-import os, re, json, time, requests, pandas as pd, streamlit as st
+import os
+import re
+import json
+import time
+import requests
+import pandas as pd
+import streamlit as st
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
 from dotenv import load_dotenv
 
 # ---------------------------
-# Config
+# Config / Secrets (safe)
 # ---------------------------
 load_dotenv()
-ADZUNA_APP_ID = os.getenv("ADZUNA_APP_ID", "")
-ADZUNA_APP_KEY = os.getenv("ADZUNA_APP_KEY", "")
-BING_SEARCH_KEY = os.getenv("BING_SEARCH_KEY", "")
-BING_ENDPOINT = os.getenv("BING_ENDPOINT", "https://api.bing.microsoft.com/v7.0/search")
+
+def _get_secret(name: str, default: str = "") -> str:
+    # Prefer Streamlit Secrets, then env vars, then default
+    try:
+        if hasattr(st, "secrets") and name in st.secrets:
+            return str(st.secrets[name])
+    except Exception:
+        pass
+    return os.getenv(name, default)
+
+ADZUNA_APP_ID = _get_secret("ADZUNA_APP_ID")
+ADZUNA_APP_KEY = _get_secret("ADZUNA_APP_KEY")
+BING_SEARCH_KEY = _get_secret("BING_SEARCH_KEY")
+BING_ENDPOINT = _get_secret("BING_ENDPOINT") or "https://api.bing.microsoft.com/v7.0/search"
 
 USER_AGENT = "Mozilla/5.0 (BD Controls BD Dashboard)"
 TIMEOUT = 20
@@ -39,7 +55,7 @@ ADZUNA_CATEGORY = "engineering-jobs"
 # ---------------------------
 # Targeting — Titles we WANT
 # ---------------------------
-# Controls/Automation engineering + leadership variants (industrial/manufacturing context)
+# Controls/Automation engineering + leadership variants (industrial/manufacturing)
 TITLE_REGEX = re.compile(
     r"""(?ix)\b(
         # Engineers
@@ -54,7 +70,7 @@ TITLE_REGEX = re.compile(
 )
 
 # ---------------------------
-# Context filter — we ONLY want industrial/manufacturing automation
+# Context filter — industrial/manufacturing controls only
 # ---------------------------
 MFG_HINTS = {
     "manufacturing","industrial","plant","factory","oem","process","production","assembly","operations",
@@ -64,7 +80,7 @@ MFG_HINTS = {
     "beckhoff","codesys","mitsubishi","omron","yaskawa","fanuc","abb robot","kuka","ur robot","robot"
 }
 
-# Explicit EXCLUDES — software/test automation / QA / DevOps automation
+# EXCLUDES — software/test automation / QA / DevOps automation
 SOFT_AUTOMATION_NEG = {
     "sdet","qa","quality assurance","test automation","automated testing","automation tester","qa automation",
     "selenium","cypress","playwright","appium","robot framework","jest","mocha","junit","pytest",
@@ -72,7 +88,8 @@ SOFT_AUTOMATION_NEG = {
 }
 
 def normalize_text(s):
-    if s is None: return ""
+    if s is None:
+        return ""
     return re.sub(r"\s+", " ", str(s)).strip()
 
 def title_is_target(title: str) -> bool:
@@ -114,17 +131,22 @@ US_STATE_NAMES = {
 }
 
 def is_staffing_agency(name: str, extra: set|None=None) -> bool:
-    if not name: return False
+    if not name:
+        return False
     n = name.lower()
     bl = set(DEFAULT_AGENCY_BLOCKLIST)
-    if extra: bl |= {x.strip().lower() for x in extra if x.strip()}
+    if extra:
+        bl |= {x.strip().lower() for x in extra if x.strip()}
     return any(b in n for b in bl) or "staffing" in n or "recruit" in n or "agency" in n or "talent" in n
 
 def is_us_location(display: str, area: list|None) -> bool:
     combined = " ".join([normalize_text(display)] + ([" ".join(area)] if area else [])).lower()
-    if "united states" in combined or "usa" in combined or re.search(r"\bUS\b", combined): return True
-    if any(s in combined for s in US_STATE_NAMES): return True
-    if any(re.search(rf"\b{abbr}\b", combined) for abbr in US_STATE_ABBR): return True
+    if "united states" in combined or "usa" in combined or re.search(r"\bUS\b", combined):
+        return True
+    if any(s in combined for s in US_STATE_NAMES):
+        return True
+    if any(re.search(rf"\b{abbr}\b", combined) for abbr in US_STATE_ABBR):
+        return True
     return False
 
 # ---------------------------
@@ -135,15 +157,18 @@ BLOCKED_DOMAINS = {
     "simplyhired.com","talent.com","snagajob.com","careerbuilder.com"
 }
 _robots_cache: dict[str, RobotFileParser] = {}
+
 def can_fetch(url: str) -> bool:
     try:
         host = urlparse(url).netloc.lower()
-        if any(host.endswith(d) for d in BLOCKED_DOMAINS): return False
+        if any(host.endswith(d) for d in BLOCKED_DOMAINS):
+            return False
         if host not in _robots_cache:
             rp = RobotFileParser()
             rp.set_url(f"https://{host}/robots.txt")
-            try: rp.read()
-            except Exception: 
+            try:
+                rp.read()
+            except Exception:
                 _robots_cache[host] = rp
                 return True
             _robots_cache[host] = rp
@@ -168,7 +193,8 @@ def _adzuna_page(query: str, where: str, max_days_old: int, page: int):
     return r.json().get("results", [])
 
 def fetch_adzuna_controls(query: str, where: str, max_days_old: int, pages: int) -> list[dict]:
-    if not (ADZUNA_APP_ID and ADZUNA_APP_KEY): return []
+    if not (ADZUNA_APP_ID and ADZUNA_APP_KEY):
+        return []
     jobs = []
     for p in range(1, pages+1):
         try:
@@ -176,7 +202,8 @@ def fetch_adzuna_controls(query: str, where: str, max_days_old: int, pages: int)
         except requests.HTTPError as e:
             code = getattr(e.response, "status_code", "HTTP")
             st.error(f"Adzuna error (HTTP {code}). Reduce pages or try later.")
-            if code in (401,403,429): st.session_state["_adzuna_quota_hit"] = True
+            if code in (401,403,429):
+                st.session_state["_adzuna_quota_hit"] = True
             break
         except Exception:
             st.error("Adzuna request failed. Check keys/network or try again.")
@@ -203,7 +230,8 @@ def fetch_greenhouse_jobs(token: str) -> list[dict]:
     try:
         r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT); r.raise_for_status()
         data = r.json()
-    except Exception: return []
+    except Exception:
+        return []
     out = []
     for j in data.get("jobs", []):
         out.append({
@@ -219,7 +247,8 @@ def fetch_lever_jobs(token: str) -> list[dict]:
     try:
         r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT); r.raise_for_status()
         data = r.json()
-    except Exception: return []
+    except Exception:
+        return []
     out = []
     for j in data:
         cats = j.get("categories") or {}
@@ -234,16 +263,18 @@ def fetch_lever_jobs(token: str) -> list[dict]:
     return out
 
 # ---------------------------
-# Web Discovery (Bing → employer pages → JSON-LD)
+# Web Discovery (Bing → employer pages → JSON-LD JobPosting)
 # ---------------------------
 def bing_search(q: str, count: int = 10, mkt: str = "en-US") -> list[dict]:
-    if not BING_SEARCH_KEY: return []
+    if not BING_SEARCH_KEY:
+        return []
     headers = {"Ocp-Apim-Subscription-Key": BING_SEARCH_KEY}
     params = {"q": q, "count": count, "mkt": mkt, "responseFilter":"Webpages"}
     try:
         r = requests.get(BING_ENDPOINT, headers=headers, params=params, timeout=TIMEOUT); r.raise_for_status()
         return (r.json().get("webPages") or {}).get("value", [])
-    except Exception: return []
+    except Exception:
+        return []
 
 def discover_controls_pages(per_role: int = 8) -> list[str]:
     # Bias to PLC/SCADA terms and exclude aggregators
@@ -256,42 +287,57 @@ def discover_controls_pages(per_role: int = 8) -> list[str]:
     for q in queries:
         for item in bing_search(q, count=per_role*2):
             url = item.get("url")
-            if not url: continue
+            if not url:
+                continue
             host = urlparse(url).netloc.lower()
-            if any(host.endswith(d) for d in BLOCKED_DOMAINS): continue
-            if not re.search(r"/careers?|/jobs?|/join|/opportunit|/vacanc", url, re.I): continue
+            if any(host.endswith(d) for d in BLOCKED_DOMAINS):
+                continue
+            # Likely career paths
+            if not re.search(r"/careers?|/jobs?|/join|/opportunit|/vacanc", url, re.I):
+                continue
             urls.append(url)
-            if len(urls) >= per_role: break
+            if len(urls) >= per_role:
+                break
     return urls
 
 def parse_jobposting_from_html(url: str) -> list[dict]:
-    if not can_fetch(url): return []
+    if not can_fetch(url):
+        return []
     try:
         r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
-        if r.status_code != 200: return []
+        if r.status_code != 200:
+            return []
         soup = BeautifulSoup(r.text, "lxml")
         out = []
         for s in soup.find_all("script", type="application/ld+json"):
-            try: data = json.loads(s.string or "{}")
-            except Exception: continue
+            try:
+                data = json.loads(s.string or "{}")
+            except Exception:
+                continue
             items = data if isinstance(data, list) else [data]
             for obj in items:
-                if not isinstance(obj, dict): continue
+                if not isinstance(obj, dict):
+                    continue
                 t = obj.get("@type") or obj.get("type")
                 if (isinstance(t, list) and not any(str(x).lower()=="jobposting" for x in t)) or (isinstance(t,str) and t.lower()!="jobposting"):
                     continue
+
                 title = normalize_text(obj.get("title"))
                 desc = normalize_text(obj.get("description") or "")
-                if not title or not title_is_target(title): continue
+                if not title or not title_is_target(title):
+                    continue
                 blob = f"{title} {desc}"
-                if looks_software_automation(blob): continue
-                if not looks_mfg_controls(blob): continue
+                if looks_software_automation(blob):
+                    continue
+                if not looks_mfg_controls(blob):
+                    continue
 
                 org = obj.get("hiringOrganization") or {}
                 company = normalize_text(org.get("name") or urlparse(url).netloc.split(":")[0])
 
                 loc = obj.get("jobLocation") or {}
-                if isinstance(loc, list) and loc: loc = loc[0]
+                if isinstance(loc, list) and loc:
+                    loc = loc[0]
                 address = (loc.get("address") or {}) if isinstance(loc, dict) else {}
                 display_loc = ", ".join(x for x in [
                     normalize_text(address.get("addressLocality")),
@@ -314,7 +360,8 @@ def web_discovery(per_role: int = 8, per_domain_cap: int = 3) -> list[dict]:
     jobs, seen = [], {}
     for url in discover_controls_pages(per_role=per_role):
         host = urlparse(url).netloc.lower()
-        if seen.get(host,0) >= per_domain_cap: continue
+        if seen.get(host,0) >= per_domain_cap:
+            continue
         postings = parse_jobposting_from_html(url)
         if postings:
             seen[host] = seen.get(host,0)+1
@@ -330,6 +377,16 @@ st.title("US Controls & Industrial Automation — Engineers + Leadership (No Age
 st.caption("Adzuna + Watchlist (Greenhouse/Lever) + Web Discovery. Filters out software/test automation.")
 
 with st.sidebar:
+    st.header("Status")
+    if ADZUNA_APP_ID and ADZUNA_APP_KEY:
+        st.success(f"Adzuna: configured (ID …{ADZUNA_APP_ID[-2:]}, Key …{ADZUNA_APP_KEY[-4:]})")
+    else:
+        st.error("Adzuna: missing keys (set ADZUNA_APP_ID/ADZUNA_APP_KEY in Settings → Secrets).")
+    if BING_SEARCH_KEY:
+        st.success("Bing Web Search: configured")
+    else:
+        st.info("Bing Web Search: add BING_SEARCH_KEY in Secrets to enable Web Discovery.")
+
     st.header("Scope")
     include_leadership = st.checkbox("Include leadership (Lead/Supervisor/Manager/Director/Head)", value=True)
     exclude_techs = st.checkbox("Exclude 'Technician' titles", value=True)
@@ -341,7 +398,7 @@ with st.sidebar:
     max_days_old = st.slider("Adzuna max days old", 1, 60, 21)
     pages = st.slider("Adzuna pages (x50 each)", 1, 12, 6)
 
-    # Request budget guard (two core queries: engineer + leadership)
+    # request budget guard (two queries: engineers + leadership)
     role_query_count = 2 if include_leadership else 1
     est_calls = (pages if use_adzuna else 0) * role_query_count
     if est_calls > SAFE_DAILY_BUDGET:
@@ -357,8 +414,6 @@ with st.sidebar:
     use_web = st.checkbox("Use Web Discovery", value=True)
     per_role = st.slider("Employer pages to discover", 1, 20, 8)
     per_domain_cap = st.slider("Max pages per domain", 1, 10, 3)
-    if use_web and not BING_SEARCH_KEY:
-        st.info("Add BING_SEARCH_KEY in Secrets to enable Web Discovery.")
 
     st.divider()
     st.header("Filters")
@@ -383,7 +438,8 @@ if run:
         q_leader  = '(controls manager OR automation manager OR "director of controls" OR "director of automation" OR controls lead OR automation lead)'
         queries = [q_engineer] + ([q_leader] if include_leadership else [])
         for q in queries:
-            if st.session_state.get("_adzuna_quota_hit"): break
+            if st.session_state.get("_adzuna_quota_hit"):
+                break
             jobs.extend(fetch_adzuna_controls(query=q, where=location_hint or "United States",
                                               max_days_old=max_days_old, pages=pages))
 
@@ -394,9 +450,12 @@ if run:
         for _, row in wl.iterrows():
             ats = (row.get("ats") or "").strip().lower()
             tok = (row.get("token") or "").strip()
-            if not tok: continue
-            if ats == "greenhouse": jobs.extend(fetch_greenhouse_jobs(tok))
-            elif ats == "lever":   jobs.extend(fetch_lever_jobs(tok))
+            if not tok:
+                continue
+            if ats == "greenhouse":
+                jobs.extend(fetch_greenhouse_jobs(tok))
+            elif ats == "lever":
+                jobs.extend(fetch_lever_jobs(tok))
 
     # 3) Web Discovery
     if use_web and BING_SEARCH_KEY:
@@ -429,7 +488,8 @@ if run:
 
         # Clean & dedupe
         for c in ["company","title","location","posted_at","url","feed"]:
-            if c in raw.columns: raw[c] = raw[c].fillna("").astype(str).str.strip()
+            if c in raw.columns:
+                raw[c] = raw[c].fillna("").astype(str).str.strip()
         raw = raw.drop_duplicates(subset=["company","title","location","url"], keep="first")
 
         if not raw.empty:
@@ -472,4 +532,4 @@ else:
     with c2: st.metric("Hiring companies", 0)
     with c3: st.metric("Unique locations", 0)
     with c4: st.metric("Feeds", "—")
-    st.info("No jobs found. Try enabling Web Discovery / Watchlist, reduce filters, or lower Adzuna pages.")
+    st.info("No jobs found. Enable Web Discovery / Watchlist, reduce filters, or lower Adzuna pages.")
