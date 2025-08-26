@@ -122,4 +122,71 @@ def fetch_workable_jobs(subdomain: str) -> list[dict]:
     return out
 
 def fetch_workday_jobs(api_base: str, query: str = "", limit: int = 100) -> list[dict]:
-    ""
+    """
+    Robust Workday adapter:
+      - Accepts api_base like: https://wd5.myworkdayjobs.com/wday/cxs/<tenant>/<site>
+      - Always returns a list (never None), even on errors
+      - Handles unexpected JSON shapes and empty results
+    """
+    def _nz(s):
+        return " ".join(str(s or "").split())
+
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        base = api_base.rstrip("/")
+        url = f"{base}/jobs"
+        payload = {"appliedFacets": {}, "limit": int(limit), "offset": 0, "searchText": query or ""}
+        r = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT)
+        r.raise_for_status()
+
+        # Some tenants return HTML on bot-guard; guard json() carefully
+        try:
+            data = r.json()
+        except Exception:
+            return []
+
+        if not isinstance(data, dict):
+            return []
+
+        postings = data.get("jobPostings") or []
+        if not isinstance(postings, list):
+            return []
+
+        out = []
+        for j in postings:
+            if not isinstance(j, dict):
+                continue
+            title = _nz(j.get("title"))
+            locs = j.get("locations") or []
+            # locations can be None or a list of dicts
+            if isinstance(locs, list):
+                loc_display = ", ".join({_nz(l.get("displayName") or "") for l in locs if isinstance(l, dict)})
+            else:
+                loc_display = _nz(j.get("locationsText") or "")
+
+            posted = _nz(j.get("postedOn") or j.get("postedDate") or "")
+            apply_url = (j.get("externalPath") or j.get("externalUrl") or "") or base
+            if apply_url.startswith("/"):
+                root = base.split("/wday/")[0].rstrip("/")
+                apply_url = root + apply_url
+
+            out.append({
+                "feed": "workday",
+                "company": _nz(j.get("company") or api_base),
+                "title": title,
+                "location": loc_display,
+                "location_area": [],
+                "posted_at": posted,
+                "url": apply_url,
+                "description": ""
+            })
+        return out
+    except Exception:
+        # Never bubble exceptions; just return empty list
+        return []
+
