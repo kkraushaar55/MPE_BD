@@ -1,0 +1,33 @@
+# 2) Watchlist (ATS direct)
+if include_watchlist and os.path.exists("companies.csv"):
+    wl = pd.read_csv("companies.csv")
+    wl.columns = [c.strip().lower() for c in wl.columns]
+
+    for _, row in wl.iterrows():
+        ats = (row.get("ats") or "").strip().lower()
+        tok = (row.get("token") or "").strip()         # slug / subdomain / company code
+        api_base = (row.get("api_base") or "").strip() # only for workday_json rows
+
+        if not ats:
+            continue
+
+        if ats == "greenhouse" and tok:
+            jobs.extend(fetch_greenhouse_jobs(tok))
+
+        elif ats == "lever" and tok:
+            jobs.extend(fetch_lever_jobs(tok))
+
+        elif ats == "smartrecruiters" and tok:
+            jobs.extend(fetch_smartrecruiters_jobs(tok))
+
+        elif ats == "ashby" and tok:
+            jobs.extend(fetch_ashby_jobs(tok))
+
+        elif ats == "workable" and tok:
+            jobs.extend(fetch_workable_jobs(tok))
+
+        elif ats in ("workday", "workday_json") and api_base:
+            # Optionally pass a role text filter; blank = everything
+            jobs.extend(fetch_workday_jobs(api_base=api_base, query=""))
+
+        # else: silently skip malformed rows
