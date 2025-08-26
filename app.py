@@ -13,17 +13,12 @@ from ats_providers import (
     fetch_workday_jobs,
 )
 
-# ---------------------------
-# Config / Setup
-# ---------------------------
 load_dotenv()
 st.set_page_config(page_title="US Controls & Industrial Automation (ATS-only)", layout="wide")
 st.title("US Controls & Industrial Automation — Engineers + Leadership (No Agencies)")
-st.caption("Direct ATS feeds (Greenhouse, Lever, SmartRecruiters, Ashby, Workable, Workday). Sorted by most recent posted date. No Adzuna.")
+st.caption("Direct ATS feeds (Greenhouse, Lever, SmartRecruiters, Ashby, Workable, Workday). Sorted by most recent posted date.")
 
-# ---------------------------
-# Targeting — titles we WANT
-# ---------------------------
+# ---------- Filters & helpers ----------
 TITLE_REGEX = re.compile(
     r"""(?ix)\b(
         (controls?|automation)\s+engineer|
@@ -35,7 +30,6 @@ TITLE_REGEX = re.compile(
     )\b"""
 )
 
-# Manufacturing/industrial controls signal
 MFG_HINTS = {
     "manufacturing","industrial","plant","factory","oem","process","production","assembly","operations",
     "control system","control systems","automation system","automation systems","instrumentation",
@@ -44,7 +38,6 @@ MFG_HINTS = {
     "beckhoff","codesys","mitsubishi","omron","yaskawa","fanuc","abb robot","kuka","ur robot","robot"
 }
 
-# Exclude software/test automation
 SOFT_AUTOMATION_NEG = {
     "sdet","qa","quality assurance","test automation","automated testing","automation tester","qa automation",
     "selenium","cypress","playwright","appium","robot framework","jest","mocha","junit","pytest",
@@ -95,9 +88,14 @@ def is_us_location(display: str, area: list|None=None) -> bool:
     if any(re.search(rf"\b{abbr}\b", combined) for abbr in US_STATE_ABBR): return True
     return False
 
-# ---------------------------
-# Sidebar UI
-# ---------------------------
+def _clean_val(v: object) -> str:
+    try:
+        s = str(v)
+        return s.strip() if s.strip().lower() != "nan" else ""
+    except Exception:
+        return ""
+
+# ---------- Sidebar ----------
 with st.sidebar:
     st.header("Scope")
     include_leadership = st.checkbox("Include leadership (Lead/Supervisor/Manager/Director/Head)", value=True)
@@ -124,79 +122,65 @@ with st.sidebar:
 
     run = st.button("Fetch Jobs")
 
-# ---------------------------
-# Fetch
-# ---------------------------
+# ---------- Fetch ----------
 jobs = []
-if run:
-    # 1) ATS Watchlist
-    if include_watchlist and os.path.exists("companies.csv"):
-        wl = pd.read_csv("companies.csv")
-        wl.columns = [c.strip().lower() for c in wl.columns]
-        for _, row in wl.iterrows():
-            ats = (row.get("ats") or "").strip().lower()
-            tok = (row.get("token") or "").strip()
-            api_base = (row.get("api_base") or "").strip()
+if run and include_watchlist and os.path.exists("companies.csv"):
+    wl = pd.read_csv("companies.csv", dtype=str).fillna("")
+    wl.columns = [c.strip().lower() for c in wl.columns]
+    for _, row in wl.iterrows():
+        ats      = _clean_val(row.get("ats")).lower()
+        tok      = _clean_val(row.get("token"))
+        api_base = _clean_val(row.get("api_base"))
 
-            if ats == "greenhouse" and tok:
-                jobs.extend(fetch_greenhouse_jobs(tok))
-            elif ats == "lever" and tok:
-                jobs.extend(fetch_lever_jobs(tok))
-            elif ats == "smartrecruiters" and tok:
-                jobs.extend(fetch_smartrecruiters_jobs(tok))
-            elif ats == "ashby" and tok:
-                jobs.extend(fetch_ashby_jobs(tok))
-            elif ats == "workable" and tok:
-                jobs.extend(fetch_workable_jobs(tok))
-            elif ats in ("workday","workday_json") and api_base:
-                jobs.extend(fetch_workday_jobs(api_base=api_base, query=""))
+        if ats == "greenhouse" and tok:
+            jobs.extend(fetch_greenhouse_jobs(tok))
+        elif ats == "lever" and tok:
+            jobs.extend(fetch_lever_jobs(tok))
+        elif ats == "smartrecruiters" and tok:
+            jobs.extend(fetch_smartrecruiters_jobs(tok))
+        elif ats == "ashby" and tok:
+            jobs.extend(fetch_ashby_jobs(tok))
+        elif ats == "workable" and tok:
+            jobs.extend(fetch_workable_jobs(tok))
+        elif ats in ("workday","workday_json") and api_base:
+            jobs.extend(fetch_workday_jobs(api_base=api_base, query=""))
+        # silently skip malformed rows
 
-# ---------------------------
-# Filter → Sort (most recent)
-# ---------------------------
+# ---------- Filter → Sort (most recent) ----------
 df = pd.DataFrame(jobs)
-if not df.empty:
-    # Title targeting
-    df = df[df["title"].apply(title_is_target)]
 
-    # Optional: exclude technician titles
+if not df.empty:
+    df = df[df["title"].apply(title_is_target)]
     if exclude_techs:
         df = df[~df["title"].str.contains(r"\btechnician\b", case=False, na=False)]
-
-    # Dump software/test automation
     df = df[~df.apply(lambda r: looks_software_automation(f'{r.get("title","")} {r.get("description","")}'), axis=1)]
-
-    # Require manufacturing/industrial controls hints
     df = df[df.apply(lambda r: looks_mfg_controls(f'{r.get("title","")} {r.get("description","")}'), axis=1)]
 
-    # US only
     if us_only:
         df = df[df.apply(lambda r: is_us_location(r.get("location",""), r.get("location_area") or []), axis=1)]
 
-    # Agencies
     if exclude_agencies:
         df = df[~df["company"].apply(lambda x: is_staffing_agency(x, extra_agencies_set))]
 
-    # Normalize columns
     for c in ["company","title","location","posted_at","url","feed"]:
         if c in df.columns:
             df[c] = df[c].fillna("").astype(str).str.strip()
     df = df.drop_duplicates(subset=["company","title","location","url"], keep="first")
 
-    # Recency: parse date → filter window → sort newest
     df["posted_at"] = pd.to_datetime(df["posted_at"], errors="coerce", utc=True)
-    cutoff = pd.Timestamp.utcnow() - pd.Timedelta(days=lookback_days)
+    now_ts = pd.Timestamp.utcnow()
+    df.loc[df["posted_at"].isna(), "posted_at"] = now_ts  # fallback so sort works
+
+    cutoff = now_ts - pd.Timedelta(days=lookback_days)
     df_recent = df[df["posted_at"] >= cutoff].copy()
     df_recent = df_recent.sort_values("posted_at", ascending=False, na_position="last")
 
-    # Metrics
     c1, c2, c3, c4 = st.columns(4)
     with c1: st.metric("Open roles (window)", int(df_recent.shape[0]))
     with c2: st.metric("Hiring companies", int(df_recent["company"].nunique()))
     with c3: st.metric("Unique locations", int(df_recent["location"].nunique()))
     with c4: st.metric("Feeds", ", ".join(sorted(df_recent["feed"].unique())) if "feed" in df_recent.columns else "—")
 
-    # Output
     st.subheader(f"Most Recent (last {lookback_days} days)")
     view = df_recent[["company","title","location","posted_at","url","feed"]].head(top_n)
     st.dataframe(view, use_container_width=True, hide_index=True)
@@ -206,6 +190,8 @@ if not df.empty:
         file_name="controls_automation_recent.csv",
         mime="text/csv",
     )
-
 else:
-    st.info("No jobs found. Check companies.csv and filters, then try again.")
+    if run:
+        st.info("No jobs found. Check companies.csv and filters, then try again.")
+    else:
+        st.caption("Set filters and click 'Fetch Jobs'.")
