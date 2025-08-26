@@ -1,9 +1,15 @@
+# app.py — ATS-only Controls & Industrial Automation Jobs (Newest First)
+# Drop this file in your repo root and run:  streamlit run app.py
+
 import os
 import re
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
+# ---------------------------
+# Import ATS adapters
+# ---------------------------
 from ats_providers import (
     fetch_greenhouse_jobs,
     fetch_lever_jobs,
@@ -13,12 +19,17 @@ from ats_providers import (
     fetch_workday_jobs,
 )
 
+# ---------------------------
+# App setup
+# ---------------------------
 load_dotenv()
 st.set_page_config(page_title="US Controls & Industrial Automation (ATS-only)", layout="wide")
 st.title("US Controls & Industrial Automation — Engineers + Leadership (No Agencies)")
-st.caption("Direct ATS feeds (Greenhouse, Lever, SmartRecruiters, Ashby, Workable, Workday). Sorted by most recent posted date.")
+st.caption("Direct ATS feeds (Greenhouse, Lever, SmartRecruiters, Ashby, Workable, Workday). Sorted by most recent posted date. No aggregators.")
 
-# ---------- Filters & helpers ----------
+# ---------------------------
+# Targeting & Filters
+# ---------------------------
 TITLE_REGEX = re.compile(
     r"""(?ix)\b(
         (controls?|automation)\s+engineer|
@@ -68,34 +79,49 @@ US_STATE_NAMES = {
     "texas","utah","vermont","virginia","washington","west virginia","wisconsin","wyoming","district of columbia"
 }
 
-def normalize_text(s): return re.sub(r"\s+", " ", str(s or "")).strip()
-def title_is_target(title: str) -> bool: return bool(TITLE_REGEX.search(title or ""))
+def normalize_text(s: object) -> str:
+    return re.sub(r"\s+", " ", str(s or "")).strip()
+
+def title_is_target(title: str) -> bool:
+    return bool(TITLE_REGEX.search(title or ""))
+
 def looks_software_automation(blob: str) -> bool:
-    b = (blob or "").lower(); return any(k in b for k in SOFT_AUTOMATION_NEG)
+    b = (blob or "").lower()
+    return any(k in b for k in SOFT_AUTOMATION_NEG)
+
 def looks_mfg_controls(blob: str) -> bool:
-    b = (blob or "").lower(); return any(k in b for k in MFG_HINTS)
+    b = (blob or "").lower()
+    return any(k in b for k in MFG_HINTS)
 
 def is_staffing_agency(name: str, extra: set|None=None) -> bool:
-    if not name: return False
+    if not name:
+        return False
     n = name.lower()
     bl = set(DEFAULT_AGENCY_BLOCKLIST) | ({x.strip().lower() for x in (extra or []) if x.strip()})
     return any(b in n for b in bl) or "staffing" in n or "recruit" in n or "agency" in n or "talent" in n
 
 def is_us_location(display: str, area: list|None=None) -> bool:
     combined = " ".join([normalize_text(display)] + ([" ".join(area)] if area else [])).lower()
-    if "united states" in combined or "usa" in combined or re.search(r"\bUS\b", combined): return True
-    if any(s in combined for s in US_STATE_NAMES): return True
-    if any(re.search(rf"\b{abbr}\b", combined) for abbr in US_STATE_ABBR): return True
+    if "united states" in combined or "usa" in combined or re.search(r"\bUS\b", combined):
+        return True
+    if any(s in combined for s in US_STATE_NAMES):
+        return True
+    if any(re.search(rf"\b{abbr}\b", combined) for abbr in US_STATE_ABBR):
+        return True
     return False
 
-def _clean_val(v: object) -> str:
+# Clean any CSV value safely (prevents .strip() on NaN/float)
+def _clean_val(v) -> str:
     try:
         s = str(v)
-        return s.strip() if s.strip().lower() != "nan" else ""
+        s = s.strip()
+        return "" if s.lower() in {"nan", "none", "nat"} else s
     except Exception:
         return ""
 
-# ---------- Sidebar ----------
+# ---------------------------
+# Sidebar UI
+# ---------------------------
 with st.sidebar:
     st.header("Scope")
     include_leadership = st.checkbox("Include leadership (Lead/Supervisor/Manager/Director/Head)", value=True)
@@ -122,65 +148,98 @@ with st.sidebar:
 
     run = st.button("Fetch Jobs")
 
-# ---------- Fetch ----------
-jobs = []
+# ---------------------------
+# Fetch (ATS-only)
+# ---------------------------
+jobs: list[dict] = []
 if run and include_watchlist and os.path.exists("companies.csv"):
+    # Read CSV as strings and kill NaNs -> avoids .strip() on float/NaN
     wl = pd.read_csv("companies.csv", dtype=str).fillna("")
     wl.columns = [c.strip().lower() for c in wl.columns]
-    for _, row in wl.iterrows():
-        ats      = _clean_val(row.get("ats")).lower()
-        tok      = _clean_val(row.get("token"))
-        api_base = _clean_val(row.get("api_base"))
 
-        if ats == "greenhouse" and tok:
-            jobs.extend(fetch_greenhouse_jobs(tok))
-        elif ats == "lever" and tok:
-            jobs.extend(fetch_lever_jobs(tok))
-        elif ats == "smartrecruiters" and tok:
-            jobs.extend(fetch_smartrecruiters_jobs(tok))
-        elif ats == "ashby" and tok:
-            jobs.extend(fetch_ashby_jobs(tok))
-        elif ats == "workable" and tok:
-            jobs.extend(fetch_workable_jobs(tok))
-        elif ats in ("workday","workday_json") and api_base:
-            jobs.extend(fetch_workday_jobs(api_base=api_base, query=""))
-        # silently skip malformed rows
+    # Quick schema check
+    required_cols = {"company", "ats", "token", "api_base", "industry"}
+    missing = required_cols - set(wl.columns)
+    if missing:
+        st.error(f"`companies.csv` is missing required columns: {sorted(missing)}")
+    else:
+        # Helpful preview for debugging
+        with st.expander("Loaded companies.csv (preview)"):
+            st.dataframe(wl.head(25), use_container_width=True, hide_index=True)
 
-# ---------- Filter → Sort (most recent) ----------
+        for _, row in wl.iterrows():
+            ats      = _clean_val(row.get("ats")).lower()
+            tok      = _clean_val(row.get("token"))
+            api_base = _clean_val(row.get("api_base"))
+
+            try:
+                if ats == "greenhouse" and tok:
+                    jobs.extend(fetch_greenhouse_jobs(tok))
+                elif ats == "lever" and tok:
+                    jobs.extend(fetch_lever_jobs(tok))
+                elif ats == "smartrecruiters" and tok:
+                    jobs.extend(fetch_smartrecruiters_jobs(tok))
+                elif ats == "ashby" and tok:
+                    jobs.extend(fetch_ashby_jobs(tok))
+                elif ats == "workable" and tok:
+                    jobs.extend(fetch_workable_jobs(tok))
+                elif ats in ("workday", "workday_json") and api_base:
+                    jobs.extend(fetch_workday_jobs(api_base=api_base, query=""))
+                # silently skip bad/empty rows
+            except Exception as e:
+                st.warning(f"Fetch failed for row ats={ats}, token='{tok}', api_base='{api_base}': {e}")
+
+# ---------------------------
+# Filter → Recency sort
+# ---------------------------
 df = pd.DataFrame(jobs)
 
 if not df.empty:
+    # Title targeting
     df = df[df["title"].apply(title_is_target)]
+
+    # Optional: exclude Technician
     if exclude_techs:
         df = df[~df["title"].str.contains(r"\btechnician\b", case=False, na=False)]
+
+    # Exclude software/test automation
     df = df[~df.apply(lambda r: looks_software_automation(f'{r.get("title","")} {r.get("description","")}'), axis=1)]
+
+    # Require manufacturing/industrial controls hints
     df = df[df.apply(lambda r: looks_mfg_controls(f'{r.get("title","")} {r.get("description","")}'), axis=1)]
 
+    # US-only filter
     if us_only:
         df = df[df.apply(lambda r: is_us_location(r.get("location",""), r.get("location_area") or []), axis=1)]
 
+    # Exclude agencies
     if exclude_agencies:
         df = df[~df["company"].apply(lambda x: is_staffing_agency(x, extra_agencies_set))]
 
+    # Clean + dedupe
     for c in ["company","title","location","posted_at","url","feed"]:
         if c in df.columns:
             df[c] = df[c].fillna("").astype(str).str.strip()
     df = df.drop_duplicates(subset=["company","title","location","url"], keep="first")
 
+    # Recency handling: parse posted_at -> filter window -> newest first
     df["posted_at"] = pd.to_datetime(df["posted_at"], errors="coerce", utc=True)
     now_ts = pd.Timestamp.utcnow()
-    df.loc[df["posted_at"].isna(), "posted_at"] = now_ts  # fallback so sort works
+    # If a job lacks a timestamp, give it "now" so sorting still works but it won't be filtered out unfairly
+    df.loc[df["posted_at"].isna(), "posted_at"] = now_ts
 
     cutoff = now_ts - pd.Timedelta(days=lookback_days)
     df_recent = df[df["posted_at"] >= cutoff].copy()
     df_recent = df_recent.sort_values("posted_at", ascending=False, na_position="last")
 
+    # Metrics
     c1, c2, c3, c4 = st.columns(4)
     with c1: st.metric("Open roles (window)", int(df_recent.shape[0]))
     with c2: st.metric("Hiring companies", int(df_recent["company"].nunique()))
     with c3: st.metric("Unique locations", int(df_recent["location"].nunique()))
     with c4: st.metric("Feeds", ", ".join(sorted(df_recent["feed"].unique())) if "feed" in df_recent.columns else "—")
 
+    # Output
     st.subheader(f"Most Recent (last {lookback_days} days)")
     view = df_recent[["company","title","location","posted_at","url","feed"]].head(top_n)
     st.dataframe(view, use_container_width=True, hide_index=True)
@@ -192,6 +251,7 @@ if not df.empty:
     )
 else:
     if run:
-        st.info("No jobs found. Check companies.csv and filters, then try again.")
+        st.info("No jobs found. Check companies.csv, widen lookback days, and try again.")
     else:
-        st.caption("Set filters and click 'Fetch Jobs'.")
+        st.caption("Set filters and click ‘Fetch Jobs’.")
+
