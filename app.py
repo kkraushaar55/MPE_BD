@@ -1,33 +1,22 @@
-# app.py — ATS + Adzuna + Web Discovery (Bing) Controls/Automation Jobs — Newest First
+# app.py — Controls/Automation Jobs (ATS + Adzuna + Web Discovery) — Newest First
 
-import os
-import re
-import json
-import time
-import requests
-import pandas as pd
-import streamlit as st
+import os, re, json, time, requests, pandas as pd, streamlit as st
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
 from dotenv import load_dotenv
 
 from ats_providers import (
-    fetch_greenhouse_jobs,
-    fetch_lever_jobs,
-    fetch_smartrecruiters_jobs,
-    fetch_ashby_jobs,
-    fetch_workable_jobs,
-    fetch_workday_jobs,
+    fetch_greenhouse_jobs, fetch_lever_jobs, fetch_smartrecruiters_jobs,
+    fetch_ashby_jobs, fetch_workable_jobs, fetch_workday_jobs,
 )
 
-# ---------- App setup ----------
+# ---------- App setup & secrets ----------
 load_dotenv()
-st.set_page_config(page_title="US Controls & Industrial Automation (ATS + Adzuna + Web)", layout="wide")
+st.set_page_config(page_title="US Controls & Industrial Automation", layout="wide")
 st.title("US Controls & Industrial Automation — Engineers + Leadership (No Agencies)")
-st.caption("Sources: ATS (Greenhouse/Lever/SmartRecruiters/Ashby/Workable/Workday) + Adzuna + Web Discovery (Bing→career pages→JSON-LD). Newest first; US-only; no agencies; filters out software QA/dev automation.")
+st.caption("Sources: ATS (Greenhouse/Lever/SmartRecruiters/Ashby/Workable/Workday) + Adzuna + Web Discovery.")
 
-# ---------- Secrets / Config ----------
 def _get_secret(name: str, default: str = "") -> str:
     try:
         if hasattr(st, "secrets") and name in st.secrets:
@@ -46,7 +35,7 @@ TIMEOUT = 20
 SAFE_DAILY_BUDGET = 150
 ADZUNA_CATEGORY = "engineering-jobs"
 
-# ---------- Targeting & Filters ----------
+# ---------- Targeting ----------
 TITLE_REGEX = re.compile(
     r"""(?ix)\b(
         (controls?|automation)\s+engineer|
@@ -82,39 +71,34 @@ DEFAULT_AGENCY_BLOCKLIST = {
     "cornerstone staffing","trc staffing","rht","aquent","apple one","lucid staffing","talentburst","datanomics"
 }
 
-US_STATE_ABBR = {
-    "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME",
-    "MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA",
-    "RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY","DC"
-}
-US_STATE_NAMES = {
-    "alabama","alaska","arizona","arkansas","california","colorado","connecticut","delaware","florida",
-    "georgia","hawaii","idaho","illinois","indiana","iowa","kansas","kentucky","louisiana","maine",
-    "maryland","massachusetts","michigan","minnesota","mississippi","missouri","montana","nebraska",
-    "nevada","new hampshire","new jersey","new mexico","new york","north carolina","north dakota",
-    "ohio","oklahoma","oregon","pennsylvania","rhode island","south carolina","south dakota","tennessee",
-    "texas","utah","vermont","virginia","washington","west virginia","wisconsin","wyoming","district of columbia"
-}
+US_STATE_ABBR = {"AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME",
+                 "MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA",
+                 "RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY","DC"}
+US_STATE_NAMES = {s.lower() for s in [
+    "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut","Delaware","Florida",
+    "Georgia","Hawaii","Idaho","Illinois","Indiana","Iowa","Kansas","Kentucky","Louisiana","Maine",
+    "Maryland","Massachusetts","Michigan","Minnesota","Mississippi","Missouri","Montana","Nebraska",
+    "Nevada","New Hampshire","New Jersey","New Mexico","New York","North Carolina","North Dakota",
+    "Ohio","Oklahoma","Oregon","Pennsylvania","Rhode Island","South Carolina","South Dakota","Tennessee",
+    "Texas","Utah","Vermont","Virginia","Washington","West Virginia","Wisconsin","Wyoming","District of Columbia"
+]}
 
-def normalize_text(s: object) -> str: return re.sub(r"\s+", " ", str(s or "")).strip()
-def title_is_target(title: str) -> bool: return bool(TITLE_REGEX.search(title or ""))
-def looks_software_automation(blob: str) -> bool: return any(k in (blob or "").lower() for k in SOFT_AUTOMATION_NEG)
-def looks_mfg_controls(blob: str) -> bool: return any(k in (blob or "").lower() for k in MFG_HINTS)
-
-def is_staffing_agency(name: str, extra: set|None=None) -> bool:
+def normalize_text(s): return re.sub(r"\s+", " ", str(s or "")).strip()
+def title_is_target(title): return bool(TITLE_REGEX.search(title or ""))
+def looks_software_automation(blob): return any(k in (blob or "").lower() for k in SOFT_AUTOMATION_NEG)
+def looks_mfg_controls(blob): return any(k in (blob or "").lower() for k in MFG_HINTS)
+def is_staffing_agency(name, extra=None):
     if not name: return False
     n = name.lower()
     bl = set(DEFAULT_AGENCY_BLOCKLIST) | ({x.strip().lower() for x in (extra or []) if x.strip()})
     return any(b in n for b in bl) or "staffing" in n or "recruit" in n or "agency" in n or "talent" in n
-
-def is_us_location(display: str, area: list|None=None) -> bool:
+def is_us_location(display, area=None):
     combined = " ".join([normalize_text(display)] + ([" ".join(area)] if area else [])).lower()
-    if "united states" in combined or "usa" in combined or re.search(r"\bUS\b", combined): return True
-    if any(s in combined for s in US_STATE_NAMES): return True
-    if any(re.search(rf"\b{abbr}\b", combined) for abbr in US_STATE_ABBR): return True
-    return False
+    return ("united states" in combined or "usa" in combined or re.search(r"\bUS\b", combined) or
+            any(s in combined for s in US_STATE_NAMES) or
+            any(re.search(rf"\b{abbr}\b", combined) for abbr in US_STATE_ABBR))
 
-def _clean_val(v) -> str:
+def _clean_val(v):
     try:
         s = str(v).strip()
         return "" if s.lower() in {"nan","none","nat"} else s
@@ -128,7 +112,7 @@ def _adzuna_page(query: str, where: str, max_days_old: int, page: int):
     params = {
         "app_id": ADZUNA_APP_ID, "app_key": ADZUNA_APP_KEY,
         "results_per_page": 50, "what": query, "where": where,
-        "category": ADZUNA_CATEGORY, "max_days_old": max_days_old,
+        "category": "engineering-jobs", "max_days_old": max_days_old,
         "content-type": "application/json",
     }
     r = requests.get(base + str(page), params=params, timeout=TIMEOUT, headers={"User-Agent": USER_AGENT})
@@ -141,8 +125,7 @@ def fetch_adzuna_controls(query: str, where: str, max_days_old: int, pages: int)
     for p in range(1, pages+1):
         try:
             results = _adzuna_page(query, where, max_days_old, p)
-        except Exception as e:
-            st.warning(f"Adzuna error on page {p}: {e}")
+        except Exception:
             break
         for j in results:
             loc = j.get("location") or {}
@@ -172,11 +155,9 @@ def can_fetch(url: str) -> bool:
         if host not in _robots_cache:
             rp = RobotFileParser()
             rp.set_url(f"https://{host}/robots.txt")
-            try:
-                rp.read()
+            try: rp.read()
             except Exception:
-                _robots_cache[host] = rp
-                return True
+                _robots_cache[host] = rp; return True
             _robots_cache[host] = rp
         return _robots_cache[host].can_fetch(USER_AGENT, url)
     except Exception:
@@ -185,7 +166,7 @@ def can_fetch(url: str) -> bool:
 def bing_search(q: str, count: int = 10, mkt: str = "en-US") -> list[dict]:
     if not BING_SEARCH_KEY: return []
     headers = {"Ocp-Apim-Subscription-Key": BING_SEARCH_KEY}
-    params = {"q": q, "count": count, "mkt": mkt, "responseFilter": "Webpages"}
+    params = {"q": q, "count": count, "mkt": mkt, "responseFilter":"Webpages"}
     try:
         r = requests.get(BING_ENDPOINT, headers=headers, params=params, timeout=TIMEOUT); r.raise_for_status()
         return (r.json().get("webPages") or {}).get("value", []) or []
@@ -201,7 +182,7 @@ def discover_controls_pages(per_role: int = 8) -> list[str]:
     urls = []
     for q in queries:
         for item in bing_search(q, count=per_role*2):
-            url = item.get("url"); 
+            url = item.get("url")
             if not url: continue
             host = urlparse(url).netloc.lower()
             if any(host.endswith(d) for d in BLOCKED_DOMAINS): continue
@@ -274,15 +255,9 @@ def web_discovery(per_role: int = 8, per_domain_cap: int = 3) -> list[dict]:
 # ---------- Sidebar ----------
 with st.sidebar:
     st.header("Status")
-    st.info("ATS: built-in (no keys)")
-    if ADZUNA_APP_ID and ADZUNA_APP_KEY:
-        st.success(f"Adzuna: configured (ID …{ADZUNA_APP_ID[-2:]})")
-    else:
-        st.info("Adzuna: not configured (optional)")
-    if BING_SEARCH_KEY:
-        st.success("Bing Web Search: configured")
-    else:
-        st.info("Bing Web Search: not configured (optional)")
+    st.info("ATS: built-in")
+    st.success(f"Adzuna: configured (…{ADZUNA_APP_ID[-2:]})") if (ADZUNA_APP_ID and ADZUNA_APP_KEY) else st.info("Adzuna: not configured")
+    st.success("Bing Web Search: configured") if BING_SEARCH_KEY else st.info("Bing Web: not configured")
 
     st.divider()
     st.header("Scope")
@@ -330,23 +305,21 @@ with st.sidebar:
 # ---------- Fetch (ATS + Adzuna + Web) ----------
 jobs: list[dict] = []
 if run:
-    # 1) Adzuna
+    # Adzuna
     if use_adzuna and ADZUNA_APP_ID and ADZUNA_APP_KEY:
         q_engineer = '(controls engineer OR automation engineer OR "instrumentation & controls engineer" OR "i&c engineer")'
         q_leader  = '(controls manager OR automation manager OR "director of controls" OR "director of automation" OR controls lead OR automation lead)'
-        queries = [q_engineer] + ([q_leader] if include_leadership else [])
-        for q in queries:
+        for q in [q_engineer] + ([q_leader] if include_leadership else []):
             jobs.extend(fetch_adzuna_controls(query=q, where=adz_where or "United States",
                                               max_days_old=adz_max_days, pages=adz_pages))
 
-    # 2) ATS Watchlist
+    # ATS
     if include_watchlist and os.path.exists("companies.csv"):
         wl = pd.read_csv("companies.csv", dtype=str).fillna("")
         wl.columns = [c.strip().lower() for c in wl.columns]
         need = {"company","ats","token","api_base","industry"}
-        missing = need - set(wl.columns)
-        if missing:
-            st.error(f"`companies.csv` is missing required columns: {sorted(missing)}")
+        if need - set(wl.columns):
+            st.error("`companies.csv` missing required columns.")
         else:
             with st.expander("Loaded companies.csv (preview)"):
                 st.dataframe(wl.head(25), use_container_width=True, hide_index=True)
@@ -355,31 +328,51 @@ if run:
                 tok      = _clean_val(row.get("token"))
                 api_base = _clean_val(row.get("api_base"))
                 try:
-                    if ats == "greenhouse" and tok:
-                        jobs.extend(fetch_greenhouse_jobs(tok))
-                    elif ats == "lever" and tok:
-                        jobs.extend(fetch_lever_jobs(tok))
-                    elif ats == "smartrecruiters" and tok:
-                        jobs.extend(fetch_smartrecruiters_jobs(tok))
-                    elif ats == "ashby" and tok:
-                        jobs.extend(fetch_ashby_jobs(tok))
-                    elif ats == "workable" and tok:
-                        jobs.extend(fetch_workable_jobs(tok))
+                    if ats == "greenhouse" and tok: jobs.extend(fetch_greenhouse_jobs(tok))
+                    elif ats == "lever" and tok: jobs.extend(fetch_lever_jobs(tok))
+                    elif ats == "smartrecruiters" and tok: jobs.extend(fetch_smartrecruiters_jobs(tok))
+                    elif ats == "ashby" and tok: jobs.extend(fetch_ashby_jobs(tok))
+                    elif ats == "workable" and tok: jobs.extend(fetch_workable_jobs(tok))
                     elif ats in ("workday","workday_json") and api_base:
                         wd_rows = fetch_workday_jobs(api_base=api_base, query="")
-                        if isinstance(wd_rows, list):
-                            jobs.extend(wd_rows)
-                        else:
-                            st.warning(f"Workday adapter returned unexpected type for {api_base}; skipping.")
+                        if isinstance(wd_rows, list): jobs.extend(wd_rows)
+                        else: st.warning(f"Workday adapter returned unexpected type for {api_base}; skipping.")
                 except Exception as e:
                     st.warning(f"Fetch failed for ats={ats}, token='{tok}', api_base='{api_base}': {e}")
 
-    # 3) Web Discovery
+    # Web
     if use_web and BING_SEARCH_KEY:
         jobs.extend(web_discovery(per_role=per_role, per_domain_cap=per_domain_cap))
 
+# ---------- Debug panel (before filters) ----------
+df_raw = pd.DataFrame(jobs)
+with st.expander("Debug: inbound data (before filters)"):
+    cA, cB, cC = st.columns(3)
+    with cA: st.metric("Total rows fetched", int(df_raw.shape[0]))
+    with cB: st.metric("Feeds detected", len(df_raw["feed"].unique()) if "feed" in df_raw.columns else 0)
+    with cC: st.metric("Companies (raw)", df_raw["company"].nunique() if "company" in df_raw.columns else 0)
+    if not df_raw.empty:
+        if "feed" in df_raw.columns:
+            st.dataframe(df_raw["feed"].value_counts(dropna=False).to_frame("rows"), use_container_width=True)
+        st.dataframe(df_raw.head(25), use_container_width=True, hide_index=True)
+    else:
+        st.info("No rows fetched from any source. Enable Adzuna/Web or fix companies.csv, then run again.")
+
+bypass_filters = st.checkbox("Temporarily bypass filters (show raw newest-first)", value=False)
+if bypass_filters and not df_raw.empty:
+    view_dbg = df_raw.copy()
+    if "posted_at" in view_dbg.columns:
+        ts = pd.to_datetime(view_dbg["posted_at"], errors="coerce", utc=True)
+        view_dbg.loc[ts.isna(), "posted_at"] = pd.Timestamp.utcnow()
+        view_dbg["posted_at"] = pd.to_datetime(view_dbg["posted_at"], errors="coerce", utc=True)
+        view_dbg = view_dbg.sort_values("posted_at", ascending=False, na_position="last")
+    cols = [c for c in ["company","title","location","posted_at","url","feed"] if c in view_dbg.columns]
+    st.subheader("Raw (no filters) — newest-first")
+    st.dataframe(view_dbg[cols].head(top_n), use_container_width=True, hide_index=True)
+    st.stop()
+
 # ---------- Filter → newest-first ----------
-df = pd.DataFrame(jobs)
+df = df_raw.copy()
 
 if not df.empty:
     df = df[df["title"].apply(title_is_target)]
@@ -389,7 +382,7 @@ if not df.empty:
     df = df[df.apply(lambda r: looks_mfg_controls(f'{r.get("title","")} {r.get("description","")}'), axis=1)]
     if us_only:
         df = df[df.apply(lambda r: is_us_location(r.get("location",""), r.get("location_area") or []), axis=1)]
-    if exclude_agencies and "company" in df.columns:
+    if "company" in df.columns and exclude_agencies:
         df = df[~df["company"].apply(lambda x: is_staffing_agency(x, extra_agencies_set))]
 
     for c in ["company","title","location","posted_at","url","feed"]:
@@ -401,8 +394,7 @@ if not df.empty:
     now_ts = pd.Timestamp.utcnow()
     df.loc[df["posted_at"].isna(), "posted_at"] = now_ts
     cutoff = now_ts - pd.Timedelta(days=lookback_days)
-    df_recent = df[df["posted_at"] >= cutoff].copy()
-    df_recent = df_recent.sort_values("posted_at", ascending=False, na_position="last")
+    df_recent = df[df["posted_at"] >= cutoff].copy().sort_values("posted_at", ascending=False, na_position="last")
 
     c1, c2, c3, c4 = st.columns(4)
     with c1: st.metric("Open roles (window)", int(df_recent.shape[0]))
@@ -411,12 +403,12 @@ if not df.empty:
     with c4: st.metric("Feeds", ", ".join(sorted(df_recent["feed"].unique())) if "feed" in df_recent.columns else "—")
 
     st.subheader(f"Most Recent (last {lookback_days} days)")
-    view = df_recent[["company","title","location","posted_at","url","feed"]].head(top_n)
-    st.dataframe(view, use_container_width=True, hide_index=True)
-    st.download_button("Download CSV", view.to_csv(index=False).encode("utf-8"),
+    cols = [c for c in ["company","title","location","posted_at","url","feed"] if c in df_recent.columns]
+    st.dataframe(df_recent[cols].head(top_n), use_container_width=True, hide_index=True)
+    st.download_button("Download CSV", df_recent[cols].to_csv(index=False).encode("utf-8"),
                        file_name="controls_automation_recent.csv", mime="text/csv")
 else:
     if run:
-        st.info("No jobs found. Enable Adzuna/Web Discovery or check companies.csv, then try again.")
+        st.info("No jobs survived filters. Use the debug expander or bypass filters to diagnose.")
     else:
-        st.caption("Set filters and click ‘Fetch Jobs’.")
+        st.caption("Set sources/filters and click ‘Fetch Jobs’.")
