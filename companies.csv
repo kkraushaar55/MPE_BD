@@ -1,5 +1,4 @@
 company,ats,token,api_base,industry
-Rockwell Automation,workday,,https://wd5.myworkdayjobs.com/wday/cxs/rockwellautomation/RA_Careers,Industrial Automation
 Siemens,smartrecruiters,siemens,,Industrial
 ABB,smartrecruiters,abb,,Industrial
 Eaton,smartrecruiters,eaton,,Industrial
@@ -7,8 +6,3 @@ Bosch Rexroth,greenhouse,boschrexroth,,Industrial
 FANUC America,lever,fanuc,,Robotics
 Universal Robots,ashby,universal-robots,,Robotics
 Marel,workable,marel,,Food Equipment
-Schneider Electric,workday,,https://se.wd3.myworkdayjobs.com/wday/cxs/se/SE,Industrial
-Parker Hannifin,workday,,https://parker.wd5.myworkdayjobs.com/wday/cxs/parker/ParkerCareers,Industrial
-Yaskawa,workday,,https://yaskawa-us-careers.wd5.myworkdayjobs.com/wday/cxs/yaskawa-us-careers/External,Robotics
-KUKA,workday,,https://kuka.wd3.myworkdayjobs.com/wday/cxs/kuka/careers,Robotics
-GE Vernova,workday,,https://jobs.gevernova.com/wday/cxs/gevernova/GEVExternalSite,Industrial
